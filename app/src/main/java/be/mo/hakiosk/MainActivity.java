@@ -47,7 +47,7 @@ public class MainActivity extends Activity {
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final Runnable retry = () -> {
-        if (web != null) web.reload();
+        if (this.web != null) this.web.reload();
     };
 
     private SharedPreferences prefs;
