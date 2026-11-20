@@ -3,6 +3,8 @@ package be.mo.hakiosk;
 import android.Manifest;
 import android.annotation.SuppressLint;
 import android.app.Activity;
+import android.app.ActivityManager;
+import android.content.ComponentName;
 import android.app.AlertDialog;
 import android.content.Intent;
 import android.content.SharedPreferences;
@@ -16,6 +18,7 @@ import android.os.Looper;
 import android.provider.Settings;
 import android.text.InputType;
 import android.view.Gravity;
+import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
@@ -49,6 +52,9 @@ public class MainActivity extends Activity {
     static final String KEY_DIM_MINUTES = "dim_minutes"; // oude instelling, wordt omgezet
     static final String KEY_DIM_SECONDS = "dim_seconds";
     static final String KEY_SENSITIVITY = "sensitivity";
+    static final String KEY_BLOCK_VOLUME = "block_volume";
+    static final String KEY_PIN = "pin_app";
+    static final String KEY_LAUNCHER = "launcher";
 
     private static final int REQ_CAMERA = 1;
     private static final long RETRY_MS = 10_000;
@@ -307,6 +313,7 @@ public class MainActivity extends Activity {
                 .setMessage("Om na een herstart van de tablet vanzelf te openen, heeft HA Kiosk de "
                         + "toestemming 'Weergeven boven andere apps' nodig. Zet die aan op het volgende scherm.")
                 .setPositiveButton("Openen", (d, w) -> {
+                    unpin();
                     try {
                         startActivity(new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
                                 Uri.parse("package:" + getPackageName())));
@@ -322,6 +329,7 @@ public class MainActivity extends Activity {
     private void showSettings() {
         if (settingsDialog != null && settingsDialog.isShowing()) return;
         wake();
+        unpin(); // anders kan het toetsenbord of een Android-scherm geblokkeerd zijn
 
         final String current = prefs.getString(KEY_URL, "");
         float dp = getResources().getDisplayMetrics().density;
@@ -351,6 +359,21 @@ public class MainActivity extends Activity {
         final EditText sensInput = numberField(prefs.getInt(KEY_SENSITIVITY, 5));
         box.addView(sensInput);
 
+        final CheckBox volumeBox = new CheckBox(this);
+        volumeBox.setText("Volumeknoppen blokkeren");
+        volumeBox.setChecked(prefs.getBoolean(KEY_BLOCK_VOLUME, false));
+        box.addView(volumeBox);
+
+        final CheckBox pinBox = new CheckBox(this);
+        pinBox.setText("App vastzetten (home- en recente-apps-knop werken niet)");
+        pinBox.setChecked(prefs.getBoolean(KEY_PIN, false));
+        box.addView(pinBox);
+
+        final CheckBox launcherBox = new CheckBox(this);
+        launcherBox.setText("Als startscherm gebruiken (homeknop brengt je terug naar de kiosk)");
+        launcherBox.setChecked(prefs.getBoolean(KEY_LAUNCHER, false));
+        box.addView(launcherBox);
+
         String motionInfo;
         if (!hasCamera()) motionInfo = "Geen toestemming voor de camera.";
         else if (lastMotion == 0) motionInfo = "Nog geen beweging gezien sinds de start.";
@@ -370,12 +393,23 @@ public class MainActivity extends Activity {
                             .putBoolean(KEY_MOTION, motionBox.isChecked())
                             .putInt(KEY_DIM_SECONDS, parseInt(dimInput, 300, 0, 86400))
                             .putInt(KEY_SENSITIVITY, parseInt(sensInput, 5, 1, 10))
+                            .putBoolean(KEY_BLOCK_VOLUME, volumeBox.isChecked())
+                            .putBoolean(KEY_PIN, pinBox.isChecked())
                             .apply();
                     if (!url.equals(current)) web.loadUrl(url);
                     startMotion();
-                    askPermissions();
+                    boolean launcherWas = prefs.getBoolean(KEY_LAUNCHER, false);
+                    setLauncher(launcherBox.isChecked());
+                    if (launcherBox.isChecked() && !launcherWas) {
+                        askDefaultLauncher();
+                    } else {
+                        askPermissions();
+                    }
                 })
-                .setNeutralButton("App sluiten", (d, w) -> finish());
+                .setNeutralButton("App sluiten", (d, w) -> {
+                    unpin();
+                    finish();
+                });
         if (!current.isEmpty()) {
             b.setNegativeButton("Herladen", (d, w) -> web.reload());
         }
@@ -383,6 +417,8 @@ public class MainActivity extends Activity {
         settingsDialog.setOnDismissListener(d -> {
             lastActivity = System.currentTimeMillis();
             hideSystemUi();
+            // even wachten: misschien opent er nog een toestemmingsscherm
+            handler.postDelayed(this::applyPinning, 1_500);
         });
         settingsDialog.show();
     }
@@ -422,6 +458,89 @@ public class MainActivity extends Activity {
         } catch (Exception e) {
             return "?";
         }
+    }
+
+    // ---------- Knoppen blokkeren ----------
+
+    private static boolean isVolumeKey(int keyCode) {
+        return keyCode == KeyEvent.KEYCODE_VOLUME_UP
+                || keyCode == KeyEvent.KEYCODE_VOLUME_DOWN
+                || keyCode == KeyEvent.KEYCODE_VOLUME_MUTE;
+    }
+
+    @Override
+    public boolean onKeyDown(int keyCode, KeyEvent event) {
+        wake();
+        if (isVolumeKey(keyCode) && prefs.getBoolean(KEY_BLOCK_VOLUME, false)) return true;
+        return super.onKeyDown(keyCode, event);
+    }
+
+    @Override
+    public boolean onKeyUp(int keyCode, KeyEvent event) {
+        if (isVolumeKey(keyCode) && prefs.getBoolean(KEY_BLOCK_VOLUME, false)) return true;
+        return super.onKeyUp(keyCode, event);
+    }
+
+    private boolean inLockTask() {
+        ActivityManager am = (ActivityManager) getSystemService(ACTIVITY_SERVICE);
+        if (am == null) return false;
+        if (Build.VERSION.SDK_INT >= 23) {
+            return am.getLockTaskModeState() != ActivityManager.LOCK_TASK_MODE_NONE;
+        }
+        //noinspection deprecation
+        return am.isInLockTaskMode();
+    }
+
+    /** Zet de app vast (Android-schermvastzetting) als dat in de instellingen aan staat. */
+    private void applyPinning() {
+        boolean dialogOpen = settingsDialog != null && settingsDialog.isShowing();
+        if (dialogOpen || !hasWindowFocus()) return;
+        if (prefs.getBoolean(KEY_PIN, false)) {
+            if (!inLockTask()) {
+                try {
+                    startLockTask();
+                } catch (Exception ignored) {
+                }
+            }
+        } else {
+            unpin();
+        }
+    }
+
+    private void unpin() {
+        if (!inLockTask()) return;
+        try {
+            stopLockTask();
+        } catch (Exception ignored) {
+        }
+    }
+
+    /** Zet de "startscherm"-variant van de app aan of uit. */
+    private void setLauncher(boolean enabled) {
+        prefs.edit().putBoolean(KEY_LAUNCHER, enabled).apply();
+        getPackageManager().setComponentEnabledSetting(
+                new ComponentName(this, getPackageName() + ".HomeAlias"),
+                enabled ? PackageManager.COMPONENT_ENABLED_STATE_ENABLED
+                        : PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
+                PackageManager.DONT_KILL_APP);
+    }
+
+    private void askDefaultLauncher() {
+        new AlertDialog.Builder(this)
+                .setTitle("Startscherm kiezen")
+                .setMessage("Kies op het volgende scherm 'HA Kiosk' als standaard startscherm. "
+                        + "Wil je later terug naar het gewone startscherm, zet deze optie dan uit "
+                        + "en kies daar je oude startscherm.")
+                .setPositiveButton("Openen", (d, w) -> {
+                    unpin();
+                    try {
+                        startActivity(new Intent(Settings.ACTION_HOME_SETTINGS));
+                    } catch (Exception e) {
+                        startActivity(new Intent(Settings.ACTION_SETTINGS));
+                    }
+                })
+                .setNegativeButton("Later", (d, w) -> askPermissions())
+                .show();
     }
 
     // ---------- Aanraking ----------
@@ -487,6 +606,7 @@ public class MainActivity extends Activity {
         hideSystemUi();
         wake();
         startMotion();
+        handler.postDelayed(this::applyPinning, 1_500);
         handler.removeCallbacks(idleCheck);
         handler.postDelayed(idleCheck, IDLE_CHECK_MS);
     }

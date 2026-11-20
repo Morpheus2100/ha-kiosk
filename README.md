@@ -10,6 +10,7 @@ Eigen kiosk-app voor een Android-tablet als Home Assistant-paneel.
 - Terugknop sluit de app niet
 - Slaapstand: na X minuten zonder aanraking/beweging wordt het scherm zwart op minimale helderheid
 - Bewegingsdetectie met de frontcamera maakt het scherm weer wakker (beelden worden niet opgeslagen)
+- Optioneel: volumeknoppen blokkeren, app vastzetten (home/recente apps uit), als startscherm gebruiken
 
 ## Instellingen
 Tik **5x snel in de linkerbovenhoek** van het scherm.
