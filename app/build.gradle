@@ -1,0 +1,42 @@
+plugins {
+    id 'com.android.application'
+}
+
+// Elke GitHub-build krijgt een hoger versienummer, zodat een update over de oude heen installeert.
+def buildNumber = (System.getenv('GITHUB_RUN_NUMBER') ?: '1').toInteger()
+
+android {
+    namespace 'be.mo.hakiosk'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'be.mo.hakiosk'
+        minSdk 21
+        targetSdk 34
+        versionCode buildNumber
+        versionName "1.0.${buildNumber}"
+    }
+
+    // Vaste sleutel in de repo: elke build heeft dezelfde handtekening,
+    // anders weigert Android een update te installeren. Prima voor eigen gebruik.
+    signingConfigs {
+        release {
+            storeFile file('kiosk.keystore')
+            storePassword 'hakiosk'
+            keyAlias 'hakiosk'
+            keyPassword 'hakiosk'
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.release
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+}
