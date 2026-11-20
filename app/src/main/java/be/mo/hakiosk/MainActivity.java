@@ -1,10 +1,12 @@
 package be.mo.hakiosk;
 
+import android.Manifest;
 import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.net.Uri;
 import android.os.Build;
@@ -26,6 +28,7 @@ import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
+import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
@@ -33,6 +36,8 @@ import android.widget.TextView;
 
 /**
  * Toont het Home Assistant-dashboard schermvullend.
+ * Na X minuten zonder aanraking of beweging gaat het scherm op zwart (minimale helderheid);
+ * beweging voor de camera of een aanraking maakt het weer wakker.
  * Instellingen openen: tik 5x snel in de linkerbovenhoek.
  */
 public class MainActivity extends Activity {
@@ -40,31 +45,57 @@ public class MainActivity extends Activity {
     static final String PREFS = "kiosk";
     static final String KEY_URL = "url";
     static final String KEY_ASKED_OVERLAY = "asked_overlay";
+    static final String KEY_MOTION = "motion_enabled";
+    static final String KEY_DIM_MINUTES = "dim_minutes";
+    static final String KEY_SENSITIVITY = "sensitivity";
 
+    private static final int REQ_CAMERA = 1;
     private static final long RETRY_MS = 10_000;
+    private static final long IDLE_CHECK_MS = 5_000;
     private static final int CORNER_TAPS_NEEDED = 5;
     private static final long CORNER_TAP_WINDOW_MS = 3_000;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
-    private final Runnable retry = () -> {
-        if (this.web != null) this.web.reload();
-    };
 
     private SharedPreferences prefs;
     private FrameLayout root;
     private WebView web;
     private TextView errorView;
+    private View sleepOverlay;
     private AlertDialog settingsDialog;
+    private MotionDetector motion;
 
+    private boolean pendingError = false;
+    private boolean asleep = false;
+    private long lastActivity = System.currentTimeMillis();
+    private long lastMotion = 0;
     private int cornerTaps = 0;
     private long firstCornerTap = 0;
+
+    private final Runnable retry = () -> {
+        pendingError = false;
+        if (this.web != null) this.web.reload();
+    };
+
+    private final Runnable idleCheck = new Runnable() {
+        @Override
+        public void run() {
+            int minutes = prefs.getInt(KEY_DIM_MINUTES, 5);
+            boolean dialogOpen = settingsDialog != null && settingsDialog.isShowing();
+            if (minutes > 0 && !asleep && !dialogOpen
+                    && System.currentTimeMillis() - lastActivity > minutes * 60_000L) {
+                sleep();
+            }
+            handler.postDelayed(this, IDLE_CHECK_MS);
+        }
+    };
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
 
-        // Scherm aan houden en tonen boven het vergrendelscherm
+        // Scherm aan houden (de camera moet blijven kijken) en tonen boven het vergrendelscherm
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
                 | WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED
                 | WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
@@ -80,15 +111,18 @@ public class MainActivity extends Activity {
 
         createWebView();
         createErrorView();
+        createSleepOverlay();
 
         String url = prefs.getString(KEY_URL, null);
         if (url == null || url.isEmpty()) {
             showSettings();
         } else {
             web.loadUrl(url);
-            maybeAskOverlayPermission();
+            askPermissions();
         }
     }
+
+    // ---------- WebView ----------
 
     @SuppressLint("SetJavaScriptEnabled")
     private void createWebView() {
@@ -102,9 +136,7 @@ public class MainActivity extends Activity {
         s.setMediaPlaybackRequiresUserGesture(false);
         s.setLoadWithOverviewMode(true);
         s.setUseWideViewPort(true);
-        if (Build.VERSION.SDK_INT >= 21) {
-            s.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
-        }
+        s.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
 
         CookieManager cookies = CookieManager.getInstance();
         cookies.setAcceptCookie(true);
@@ -136,13 +168,11 @@ public class MainActivity extends Activity {
 
             @Override
             public boolean onRenderProcessGone(WebView view, RenderProcessGoneDetail detail) {
-                // WebView gecrasht: opnieuw opbouwen in plaats van de hele app te laten crashen
-                recreateWebView();
+                recreateWebView(); // WebView gecrasht: opnieuw opbouwen i.p.v. app-crash
                 return true;
             }
         });
 
-        // Verberg de foutmelding zodra een pagina succesvol begint te tekenen
         web.setWebChromeClient(new WebChromeClient() {
             @Override
             public void onProgressChanged(WebView view, int newProgress) {
@@ -155,8 +185,6 @@ public class MainActivity extends Activity {
         root.addView(web, 0, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
     }
-
-    private boolean pendingError = false;
 
     private void recreateWebView() {
         if (web != null) {
@@ -186,66 +214,77 @@ public class MainActivity extends Activity {
                 + "\n\nNieuwe poging over 10 seconden…");
         errorView.setVisibility(View.VISIBLE);
         handler.removeCallbacks(retry);
-        handler.postDelayed(() -> {
-            pendingError = false;
-            retry.run();
-        }, RETRY_MS);
+        handler.postDelayed(retry, RETRY_MS);
     }
 
-    // ---------- Instellingen ----------
+    // ---------- Slaapstand en beweging ----------
 
-    private void showSettings() {
-        if (settingsDialog != null && settingsDialog.isShowing()) return;
+    private void createSleepOverlay() {
+        sleepOverlay = new View(this);
+        sleepOverlay.setBackgroundColor(Color.BLACK);
+        sleepOverlay.setVisibility(View.GONE);
+        root.addView(sleepOverlay, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+    }
 
-        final String current = prefs.getString(KEY_URL, "");
-        int pad = (int) (20 * getResources().getDisplayMetrics().density);
+    private void sleep() {
+        asleep = true;
+        sleepOverlay.setVisibility(View.VISIBLE);
+        setBrightness(0.01f);
+    }
 
-        LinearLayout box = new LinearLayout(this);
-        box.setOrientation(LinearLayout.VERTICAL);
-        box.setPadding(pad, pad / 2, pad, 0);
+    private void wake() {
+        lastActivity = System.currentTimeMillis();
+        if (!asleep) return;
+        asleep = false;
+        sleepOverlay.setVisibility(View.GONE);
+        setBrightness(WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE);
+    }
 
-        TextView hint = new TextView(this);
-        hint.setText("Adres van je Home Assistant-dashboard, bv. http://192.168.1.10:8123/lovelace/0"
-                + "\n\nInstellingen later terug openen: tik 5x snel in de linkerbovenhoek."
-                + "\n\nVersie " + versionName());
-        box.addView(hint);
+    private void setBrightness(float value) {
+        WindowManager.LayoutParams lp = getWindow().getAttributes();
+        lp.screenBrightness = value;
+        getWindow().setAttributes(lp);
+    }
 
-        final EditText input = new EditText(this);
-        input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
-        input.setText(current.isEmpty() ? "http://" : current);
-        input.setSelection(input.getText().length());
-        box.addView(input);
+    private void onMotion() {
+        lastMotion = System.currentTimeMillis();
+        wake();
+    }
 
-        AlertDialog.Builder b = new AlertDialog.Builder(this)
-                .setTitle("HA Kiosk – instellingen")
-                .setView(box)
-                .setCancelable(!current.isEmpty())
-                .setPositiveButton("Opslaan", (d, w) -> {
-                    String url = normalizeUrl(input.getText().toString());
-                    prefs.edit().putString(KEY_URL, url).apply();
-                    web.loadUrl(url);
-                    maybeAskOverlayPermission();
-                })
-                .setNeutralButton("App sluiten", (d, w) -> finish());
-        if (!current.isEmpty()) {
-            b.setNegativeButton("Herladen", (d, w) -> web.reload());
+    private boolean hasCamera() {
+        return Build.VERSION.SDK_INT < 23
+                || checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED;
+    }
+
+    private void startMotion() {
+        stopMotion();
+        if (!prefs.getBoolean(KEY_MOTION, true) || !hasCamera()) return;
+        motion = new MotionDetector(prefs.getInt(KEY_SENSITIVITY, 5), this::onMotion);
+        motion.start();
+    }
+
+    private void stopMotion() {
+        if (motion != null) {
+            motion.stop();
+            motion = null;
         }
-        settingsDialog = b.create();
-        settingsDialog.setOnDismissListener(d -> hideSystemUi());
-        settingsDialog.show();
     }
 
-    private static String normalizeUrl(String raw) {
-        String url = raw.trim();
-        if (!url.startsWith("http://") && !url.startsWith("https://")) url = "http://" + url;
-        return url;
+    private void askPermissions() {
+        if (Build.VERSION.SDK_INT >= 23 && prefs.getBoolean(KEY_MOTION, true) && !hasCamera()) {
+            requestPermissions(new String[]{Manifest.permission.CAMERA}, REQ_CAMERA);
+        } else {
+            maybeAskOverlayPermission();
+        }
     }
 
-    private String versionName() {
-        try {
-            return getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
-        } catch (Exception e) {
-            return "?";
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] results) {
+        super.onRequestPermissionsResult(requestCode, permissions, results);
+        if (requestCode == REQ_CAMERA) {
+            startMotion();
+            maybeAskOverlayPermission();
         }
     }
 
@@ -271,10 +310,124 @@ public class MainActivity extends Activity {
                 .show();
     }
 
-    // ---------- Geheime tik in de hoek ----------
+    // ---------- Instellingen ----------
+
+    private void showSettings() {
+        if (settingsDialog != null && settingsDialog.isShowing()) return;
+        wake();
+
+        final String current = prefs.getString(KEY_URL, "");
+        float dp = getResources().getDisplayMetrics().density;
+        int pad = (int) (20 * dp);
+
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(pad, pad / 2, pad, 0);
+
+        box.addView(label("Adres van je Home Assistant-dashboard, bv. http://192.168.1.10:8123/lovelace/0"));
+        final EditText urlInput = new EditText(this);
+        urlInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
+        urlInput.setText(current.isEmpty() ? "http://" : current);
+        urlInput.setSelection(urlInput.getText().length());
+        box.addView(urlInput);
+
+        final CheckBox motionBox = new CheckBox(this);
+        motionBox.setText("Scherm wekken bij beweging (frontcamera)");
+        motionBox.setChecked(prefs.getBoolean(KEY_MOTION, true));
+        box.addView(motionBox);
+
+        box.addView(label("Scherm zwart na zoveel minuten zonder beweging (0 = nooit)"));
+        final EditText dimInput = numberField(prefs.getInt(KEY_DIM_MINUTES, 5));
+        box.addView(dimInput);
+
+        box.addView(label("Gevoeligheid beweging, 1 (laag) tot 10 (hoog)"));
+        final EditText sensInput = numberField(prefs.getInt(KEY_SENSITIVITY, 5));
+        box.addView(sensInput);
+
+        String motionInfo;
+        if (!hasCamera()) motionInfo = "Geen toestemming voor de camera.";
+        else if (lastMotion == 0) motionInfo = "Nog geen beweging gezien sinds de start.";
+        else motionInfo = "Laatste beweging: " + (System.currentTimeMillis() - lastMotion) / 1000 + " s geleden.";
+        box.addView(label("\n" + motionInfo
+                + "\nInstellingen openen: tik 5x snel in de linkerbovenhoek."
+                + "\nVersie " + versionName()));
+
+        AlertDialog.Builder b = new AlertDialog.Builder(this)
+                .setTitle("HA Kiosk – instellingen")
+                .setView(box)
+                .setCancelable(!current.isEmpty())
+                .setPositiveButton("Opslaan", (d, w) -> {
+                    String url = normalizeUrl(urlInput.getText().toString());
+                    prefs.edit()
+                            .putString(KEY_URL, url)
+                            .putBoolean(KEY_MOTION, motionBox.isChecked())
+                            .putInt(KEY_DIM_MINUTES, parseInt(dimInput, 5, 0, 1440))
+                            .putInt(KEY_SENSITIVITY, parseInt(sensInput, 5, 1, 10))
+                            .apply();
+                    if (!url.equals(current)) web.loadUrl(url);
+                    startMotion();
+                    askPermissions();
+                })
+                .setNeutralButton("App sluiten", (d, w) -> finish());
+        if (!current.isEmpty()) {
+            b.setNegativeButton("Herladen", (d, w) -> web.reload());
+        }
+        settingsDialog = b.create();
+        settingsDialog.setOnDismissListener(d -> {
+            lastActivity = System.currentTimeMillis();
+            hideSystemUi();
+        });
+        settingsDialog.show();
+    }
+
+    private TextView label(String text) {
+        TextView t = new TextView(this);
+        t.setText(text);
+        t.setPadding(0, (int) (8 * getResources().getDisplayMetrics().density), 0, 0);
+        return t;
+    }
+
+    private EditText numberField(int value) {
+        EditText e = new EditText(this);
+        e.setInputType(InputType.TYPE_CLASS_NUMBER);
+        e.setText(String.valueOf(value));
+        return e;
+    }
+
+    private static int parseInt(EditText e, int fallback, int min, int max) {
+        try {
+            int v = Integer.parseInt(e.getText().toString().trim());
+            return Math.max(min, Math.min(max, v));
+        } catch (NumberFormatException ex) {
+            return fallback;
+        }
+    }
+
+    private static String normalizeUrl(String raw) {
+        String url = raw.trim();
+        if (!url.startsWith("http://") && !url.startsWith("https://")) url = "http://" + url;
+        return url;
+    }
+
+    private String versionName() {
+        try {
+            return getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
+        } catch (Exception e) {
+            return "?";
+        }
+    }
+
+    // ---------- Aanraking ----------
 
     @Override
     public boolean dispatchTouchEvent(MotionEvent ev) {
+        if (asleep) {
+            // eerste aanraking maakt enkel wakker, zonder op het dashboard te klikken
+            if (ev.getActionMasked() == MotionEvent.ACTION_DOWN) wake();
+            return true;
+        }
+        lastActivity = System.currentTimeMillis();
+
         if (ev.getActionMasked() == MotionEvent.ACTION_DOWN) {
             float corner = 80 * getResources().getDisplayMetrics().density;
             if (ev.getX() < corner && ev.getY() < corner) {
@@ -294,7 +447,7 @@ public class MainActivity extends Activity {
         return super.dispatchTouchEvent(ev);
     }
 
-    // ---------- Volledig scherm ----------
+    // ---------- Volledig scherm en levenscyclus ----------
 
     @Override
     public void onWindowFocusChanged(boolean hasFocus) {
@@ -317,7 +470,7 @@ public class MainActivity extends Activity {
     @Override
     public void onBackPressed() {
         if (web != null && web.canGoBack()) web.goBack();
-        // anders niets doen: terugknop sluit de kiosk niet
+        // anders niets: de terugknop sluit de kiosk niet
     }
 
     @Override
@@ -325,10 +478,16 @@ public class MainActivity extends Activity {
         super.onResume();
         if (web != null) web.onResume();
         hideSystemUi();
+        wake();
+        startMotion();
+        handler.removeCallbacks(idleCheck);
+        handler.postDelayed(idleCheck, IDLE_CHECK_MS);
     }
 
     @Override
     protected void onPause() {
+        handler.removeCallbacks(idleCheck);
+        stopMotion(); // camera vrijgeven als de app niet op de voorgrond staat
         if (web != null) web.onPause();
         CookieManager.getInstance().flush();
         super.onPause();
@@ -337,6 +496,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         handler.removeCallbacksAndMessages(null);
+        stopMotion();
         if (web != null) web.destroy();
         super.onDestroy();
     }

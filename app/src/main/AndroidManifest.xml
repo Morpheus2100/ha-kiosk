@@ -7,6 +7,10 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <!-- Nodig zodat de app zichzelf mag openen na een herstart (Android 10+) -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <!-- Frontcamera voor bewegingsdetectie; beelden worden enkel geanalyseerd, niet opgeslagen -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <uses-feature android:name="android.hardware.camera.front" android:required="false" />
 
     <application
         android:allowBackup="true"

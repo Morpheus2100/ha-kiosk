@@ -8,6 +8,8 @@ Eigen kiosk-app voor een Android-tablet als Home Assistant-paneel.
 - Start vanzelf na een herstart van de tablet en na een update
 - Herlaadt vanzelf als HA even weg is (bv. tijdens een HA-update)
 - Terugknop sluit de app niet
+- Slaapstand: na X minuten zonder aanraking/beweging wordt het scherm zwart op minimale helderheid
+- Bewegingsdetectie met de frontcamera maakt het scherm weer wakker (beelden worden niet opgeslagen)
 
 ## Instellingen
 Tik **5x snel in de linkerbovenhoek** van het scherm.
