@@ -46,12 +46,13 @@ public class MainActivity extends Activity {
     static final String KEY_URL = "url";
     static final String KEY_ASKED_OVERLAY = "asked_overlay";
     static final String KEY_MOTION = "motion_enabled";
-    static final String KEY_DIM_MINUTES = "dim_minutes";
+    static final String KEY_DIM_MINUTES = "dim_minutes"; // oude instelling, wordt omgezet
+    static final String KEY_DIM_SECONDS = "dim_seconds";
     static final String KEY_SENSITIVITY = "sensitivity";
 
     private static final int REQ_CAMERA = 1;
     private static final long RETRY_MS = 10_000;
-    private static final long IDLE_CHECK_MS = 5_000;
+    private static final long IDLE_CHECK_MS = 1_000;
     private static final int CORNER_TAPS_NEEDED = 5;
     private static final long CORNER_TAP_WINDOW_MS = 3_000;
 
@@ -80,10 +81,10 @@ public class MainActivity extends Activity {
     private final Runnable idleCheck = new Runnable() {
         @Override
         public void run() {
-            int minutes = prefs.getInt(KEY_DIM_MINUTES, 5);
+            int seconds = dimSeconds();
             boolean dialogOpen = settingsDialog != null && settingsDialog.isShowing();
-            if (minutes > 0 && !asleep && !dialogOpen
-                    && System.currentTimeMillis() - lastActivity > minutes * 60_000L) {
+            if (seconds > 0 && !asleep && !dialogOpen
+                    && System.currentTimeMillis() - lastActivity > seconds * 1_000L) {
                 sleep();
             }
             handler.postDelayed(this, IDLE_CHECK_MS);
@@ -252,6 +253,12 @@ public class MainActivity extends Activity {
         wake();
     }
 
+    /** Tijd tot slaapstand in seconden; zet een oude minuten-instelling om. */
+    private int dimSeconds() {
+        if (prefs.contains(KEY_DIM_SECONDS)) return prefs.getInt(KEY_DIM_SECONDS, 300);
+        return prefs.getInt(KEY_DIM_MINUTES, 5) * 60;
+    }
+
     private boolean hasCamera() {
         return Build.VERSION.SDK_INT < 23
                 || checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED;
@@ -336,8 +343,8 @@ public class MainActivity extends Activity {
         motionBox.setChecked(prefs.getBoolean(KEY_MOTION, true));
         box.addView(motionBox);
 
-        box.addView(label("Scherm zwart na zoveel minuten zonder beweging (0 = nooit)"));
-        final EditText dimInput = numberField(prefs.getInt(KEY_DIM_MINUTES, 5));
+        box.addView(label("Scherm zwart na zoveel seconden zonder beweging (0 = nooit, 300 = 5 minuten)"));
+        final EditText dimInput = numberField(dimSeconds());
         box.addView(dimInput);
 
         box.addView(label("Gevoeligheid beweging, 1 (laag) tot 10 (hoog)"));
@@ -361,7 +368,7 @@ public class MainActivity extends Activity {
                     prefs.edit()
                             .putString(KEY_URL, url)
                             .putBoolean(KEY_MOTION, motionBox.isChecked())
-                            .putInt(KEY_DIM_MINUTES, parseInt(dimInput, 5, 0, 1440))
+                            .putInt(KEY_DIM_SECONDS, parseInt(dimInput, 300, 0, 86400))
                             .putInt(KEY_SENSITIVITY, parseInt(sensInput, 5, 1, 10))
                             .apply();
                     if (!url.equals(current)) web.loadUrl(url);
