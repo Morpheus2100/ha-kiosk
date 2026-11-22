@@ -35,6 +35,7 @@ import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
+import android.widget.ScrollView;
 import android.widget.TextView;
 
 /**
@@ -55,6 +56,8 @@ public class MainActivity extends Activity {
     static final String KEY_BLOCK_VOLUME = "block_volume";
     static final String KEY_PIN = "pin_app";
     static final String KEY_LAUNCHER = "launcher";
+    static final String KEY_RELOAD_ON_WAKE = "reload_on_wake";
+    static final String KEY_RELOAD_MINUTES = "reload_minutes";
 
     private static final int REQ_CAMERA = 1;
     private static final long RETRY_MS = 10_000;
@@ -76,6 +79,7 @@ public class MainActivity extends Activity {
     private boolean asleep = false;
     private long lastActivity = System.currentTimeMillis();
     private long lastMotion = 0;
+    private long lastLoad = System.currentTimeMillis();
     private int cornerTaps = 0;
     private long firstCornerTap = 0;
 
@@ -92,6 +96,11 @@ public class MainActivity extends Activity {
             if (seconds > 0 && !asleep && !dialogOpen
                     && System.currentTimeMillis() - lastActivity > seconds * 1_000L) {
                 sleep();
+            }
+            int reloadMin = prefs.getInt(KEY_RELOAD_MINUTES, 0);
+            if (reloadMin > 0 && !dialogOpen && !asleep
+                    && System.currentTimeMillis() - lastLoad > reloadMin * 60_000L) {
+                reloadPage();
             }
             handler.postDelayed(this, IDLE_CHECK_MS);
         }
@@ -157,6 +166,7 @@ public class MainActivity extends Activity {
 
             @Override
             public void onPageFinished(WebView view, String url) {
+                lastLoad = System.currentTimeMillis();
                 CookieManager.getInstance().flush();
             }
 
@@ -238,6 +248,8 @@ public class MainActivity extends Activity {
         asleep = true;
         sleepOverlay.setVisibility(View.VISIBLE);
         setBrightness(0.01f);
+        // Dashboard pauzeren: camerastreams stoppen (spaart ook de batterij van de Nest Cam)
+        if (web != null) web.onPause();
     }
 
     private void wake() {
@@ -246,6 +258,15 @@ public class MainActivity extends Activity {
         asleep = false;
         sleepOverlay.setVisibility(View.GONE);
         setBrightness(WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE);
+        if (web != null) {
+            web.onResume();
+            if (prefs.getBoolean(KEY_RELOAD_ON_WAKE, true)) reloadPage(); // verse camerabeelden
+        }
+    }
+
+    private void reloadPage() {
+        lastLoad = System.currentTimeMillis();
+        if (web != null) web.reload();
     }
 
     private void setBrightness(float value) {
@@ -359,6 +380,15 @@ public class MainActivity extends Activity {
         final EditText sensInput = numberField(prefs.getInt(KEY_SENSITIVITY, 5));
         box.addView(sensInput);
 
+        final CheckBox reloadWakeBox = new CheckBox(this);
+        reloadWakeBox.setText("Dashboard herladen bij wakker worden (verse camerabeelden)");
+        reloadWakeBox.setChecked(prefs.getBoolean(KEY_RELOAD_ON_WAKE, true));
+        box.addView(reloadWakeBox);
+
+        box.addView(label("Dashboard automatisch herladen elke zoveel minuten (0 = nooit)"));
+        final EditText reloadInput = numberField(prefs.getInt(KEY_RELOAD_MINUTES, 0));
+        box.addView(reloadInput);
+
         final CheckBox volumeBox = new CheckBox(this);
         volumeBox.setText("Volumeknoppen blokkeren");
         volumeBox.setChecked(prefs.getBoolean(KEY_BLOCK_VOLUME, false));
@@ -384,7 +414,7 @@ public class MainActivity extends Activity {
 
         AlertDialog.Builder b = new AlertDialog.Builder(this)
                 .setTitle("HA Kiosk – instellingen")
-                .setView(box)
+                .setView(scrollable(box))
                 .setCancelable(!current.isEmpty())
                 .setPositiveButton("Opslaan", (d, w) -> {
                     String url = normalizeUrl(urlInput.getText().toString());
@@ -393,6 +423,8 @@ public class MainActivity extends Activity {
                             .putBoolean(KEY_MOTION, motionBox.isChecked())
                             .putInt(KEY_DIM_SECONDS, parseInt(dimInput, 300, 0, 86400))
                             .putInt(KEY_SENSITIVITY, parseInt(sensInput, 5, 1, 10))
+                            .putBoolean(KEY_RELOAD_ON_WAKE, reloadWakeBox.isChecked())
+                            .putInt(KEY_RELOAD_MINUTES, parseInt(reloadInput, 0, 0, 1440))
                             .putBoolean(KEY_BLOCK_VOLUME, volumeBox.isChecked())
                             .putBoolean(KEY_PIN, pinBox.isChecked())
                             .apply();
@@ -421,6 +453,12 @@ public class MainActivity extends Activity {
             handler.postDelayed(this::applyPinning, 1_500);
         });
         settingsDialog.show();
+    }
+
+    private View scrollable(View content) {
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(content);
+        return scroll;
     }
 
     private TextView label(String text) {
