@@ -6,6 +6,7 @@ import android.app.Activity;
 import android.app.ActivityManager;
 import android.content.ComponentName;
 import android.app.AlertDialog;
+import android.app.admin.DevicePolicyManager;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
@@ -31,6 +32,7 @@ import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
+import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.FrameLayout;
@@ -57,6 +59,8 @@ public class MainActivity extends Activity {
     static final String KEY_PIN = "pin_app";
     static final String KEY_LAUNCHER = "launcher";
     static final String KEY_RELOAD_ON_WAKE = "reload_on_wake";
+    static final String KEY_SCREEN_OFF = "screen_off";
+    static final String EXTRA_WOKE = "woke";
     static final String KEY_RELOAD_MINUTES = "reload_minutes";
 
     private static final int REQ_CAMERA = 1;
@@ -73,12 +77,11 @@ public class MainActivity extends Activity {
     private TextView errorView;
     private View sleepOverlay;
     private AlertDialog settingsDialog;
-    private MotionDetector motion;
 
     private boolean pendingError = false;
     private boolean asleep = false;
     private long lastActivity = System.currentTimeMillis();
-    private long lastMotion = 0;
+    private boolean sleptViaLock = false;
     private long lastLoad = System.currentTimeMillis();
     private int cornerTaps = 0;
     private long firstCornerTap = 0;
@@ -245,6 +248,18 @@ public class MainActivity extends Activity {
     }
 
     private void sleep() {
+        if (prefs.getBoolean(KEY_SCREEN_OFF, false) && adminActive()) {
+            // Scherm echt uit; de achtergronddienst blijft met de camera meekijken
+            MotionService.ignoreUntil = System.currentTimeMillis() + 3_000;
+            sleptViaLock = true;
+            try {
+                devicePolicy().lockNow();
+                return;
+            } catch (Exception e) {
+                sleptViaLock = false; // terugvallen op zwart scherm
+            }
+        }
+        MotionService.ignoreUntil = System.currentTimeMillis() + 2_000;
         asleep = true;
         sleepOverlay.setVisibility(View.VISIBLE);
         setBrightness(0.01f);
@@ -276,8 +291,32 @@ public class MainActivity extends Activity {
     }
 
     private void onMotion() {
-        lastMotion = System.currentTimeMillis();
         wake();
+    }
+
+    private DevicePolicyManager devicePolicy() {
+        return (DevicePolicyManager) getSystemService(DEVICE_POLICY_SERVICE);
+    }
+
+    private ComponentName adminComponent() {
+        return new ComponentName(this, AdminReceiver.class);
+    }
+
+    private boolean adminActive() {
+        DevicePolicyManager dpm = devicePolicy();
+        return dpm != null && dpm.isAdminActive(adminComponent());
+    }
+
+    private void requestAdmin() {
+        unpin();
+        Intent i = new Intent(DevicePolicyManager.ACTION_ADD_DEVICE_ADMIN);
+        i.putExtra(DevicePolicyManager.EXTRA_DEVICE_ADMIN, adminComponent());
+        i.putExtra(DevicePolicyManager.EXTRA_ADD_EXPLANATION,
+                "HA Kiosk gebruikt dit enkel om het scherm uit te zetten na een tijd zonder beweging.");
+        try {
+            startActivity(i);
+        } catch (Exception ignored) {
+        }
     }
 
     /** Tijd tot slaapstand in seconden; zet een oude minuten-instelling om. */
@@ -291,18 +330,18 @@ public class MainActivity extends Activity {
                 || checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED;
     }
 
-    private void startMotion() {
-        stopMotion();
-        if (!prefs.getBoolean(KEY_MOTION, true) || !hasCamera()) return;
-        motion = new MotionDetector(prefs.getInt(KEY_SENSITIVITY, 5), this::onMotion);
-        motion.start();
+    /** Start de achtergronddienst (of herstart hem, bv. na een nieuwe gevoeligheid). */
+    private void startMotion(boolean restart) {
+        if (!prefs.getBoolean(KEY_MOTION, true) || !hasCamera()) {
+            stopMotion();
+            return;
+        }
+        if (restart && MotionService.running) MotionService.stop(this);
+        MotionService.start(this);
     }
 
     private void stopMotion() {
-        if (motion != null) {
-            motion.stop();
-            motion = null;
-        }
+        MotionService.stop(this);
     }
 
     private void askPermissions() {
@@ -317,7 +356,7 @@ public class MainActivity extends Activity {
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] results) {
         super.onRequestPermissionsResult(requestCode, permissions, results);
         if (requestCode == REQ_CAMERA) {
-            startMotion();
+            startMotion(false);
             maybeAskOverlayPermission();
         }
     }
@@ -404,6 +443,21 @@ public class MainActivity extends Activity {
         launcherBox.setChecked(prefs.getBoolean(KEY_LAUNCHER, false));
         box.addView(launcherBox);
 
+        final CheckBox screenOffBox = new CheckBox(this);
+        screenOffBox.setText("Scherm echt uitzetten in slaapstand (vraagt toestemming apparaatbeheerder)");
+        screenOffBox.setChecked(prefs.getBoolean(KEY_SCREEN_OFF, false) && adminActive());
+        box.addView(screenOffBox);
+
+        Button updateButton = new Button(this);
+        updateButton.setText("Zoeken naar update");
+        updateButton.setOnClickListener(v -> {
+            if (settingsDialog != null) settingsDialog.dismiss();
+            unpin();
+            startActivity(new Intent(this, UpdateActivity.class));
+        });
+        box.addView(updateButton);
+
+        long lastMotion = MotionService.lastMotion;
         String motionInfo;
         if (!hasCamera()) motionInfo = "Geen toestemming voor de camera.";
         else if (lastMotion == 0) motionInfo = "Nog geen beweging gezien sinds de start.";
@@ -427,12 +481,18 @@ public class MainActivity extends Activity {
                             .putInt(KEY_RELOAD_MINUTES, parseInt(reloadInput, 0, 0, 1440))
                             .putBoolean(KEY_BLOCK_VOLUME, volumeBox.isChecked())
                             .putBoolean(KEY_PIN, pinBox.isChecked())
+                            .putBoolean(KEY_SCREEN_OFF, screenOffBox.isChecked())
                             .apply();
                     if (!url.equals(current)) web.loadUrl(url);
-                    startMotion();
+                    startMotion(true);
+                    if (!screenOffBox.isChecked() && adminActive()) {
+                        devicePolicy().removeActiveAdmin(adminComponent());
+                    }
                     boolean launcherWas = prefs.getBoolean(KEY_LAUNCHER, false);
                     setLauncher(launcherBox.isChecked());
-                    if (launcherBox.isChecked() && !launcherWas) {
+                    if (screenOffBox.isChecked() && !adminActive()) {
+                        requestAdmin();
+                    } else if (launcherBox.isChecked() && !launcherWas) {
                         askDefaultLauncher();
                     } else {
                         askPermissions();
@@ -440,6 +500,7 @@ public class MainActivity extends Activity {
                 })
                 .setNeutralButton("App sluiten", (d, w) -> {
                     unpin();
+                    stopMotion();
                     finish();
                 });
         if (!current.isEmpty()) {
@@ -638,12 +699,24 @@ public class MainActivity extends Activity {
     }
 
     @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+    }
+
+    @Override
     protected void onResume() {
         super.onResume();
         if (web != null) web.onResume();
         hideSystemUi();
+        MotionService.listener = this::onMotion;
+        if (sleptViaLock) {
+            // wakker geworden na "scherm echt uit"
+            sleptViaLock = false;
+            if (prefs.getBoolean(KEY_RELOAD_ON_WAKE, true)) reloadPage();
+        }
         wake();
-        startMotion();
+        startMotion(false);
         handler.postDelayed(this::applyPinning, 1_500);
         handler.removeCallbacks(idleCheck);
         handler.postDelayed(idleCheck, IDLE_CHECK_MS);
@@ -652,7 +725,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onPause() {
         handler.removeCallbacks(idleCheck);
-        stopMotion(); // camera vrijgeven als de app niet op de voorgrond staat
+        MotionService.listener = null; // dienst blijft draaien en wekt de kiosk bij beweging
         if (web != null) web.onPause();
         CookieManager.getInstance().flush();
         super.onPause();
@@ -661,7 +734,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         handler.removeCallbacksAndMessages(null);
-        stopMotion();
+        if (MotionService.listener != null) MotionService.listener = null;
         if (web != null) web.destroy();
         super.onDestroy();
     }

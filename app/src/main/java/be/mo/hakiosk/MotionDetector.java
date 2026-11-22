@@ -65,6 +65,8 @@ public class MotionDetector implements Camera.PreviewCallback {
         camHandler = null;
     }
 
+    private int openAttempts = 0;
+
     private void open() {
         try {
             camera = Camera.open(findCamera());
@@ -90,6 +92,9 @@ public class MotionDetector implements Camera.PreviewCallback {
         } catch (Exception e) {
             Log.e(TAG, "Camera openen mislukt", e);
             release();
+            // camera kan nog bezet zijn door een vorige sessie: even later opnieuw proberen
+            Handler h = camHandler;
+            if (h != null && ++openAttempts < 10) h.postDelayed(this::open, 1_000);
         }
     }
 

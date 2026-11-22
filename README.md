@@ -10,6 +10,8 @@ Eigen kiosk-app voor een Android-tablet als Home Assistant-paneel.
 - Terugknop sluit de app niet
 - Slaapstand: na X minuten zonder aanraking/beweging wordt het scherm zwart op minimale helderheid
 - Bewegingsdetectie met de frontcamera maakt het scherm weer wakker (beelden worden niet opgeslagen)
+- Optioneel: scherm echt uitzetten in slaapstand (apparaatbeheerder); de camera blijft op de achtergrond meekijken
+- Bijwerken vanuit de app: icoon "HA Kiosk bijwerken" of de knop in de instellingen
 - Optioneel: volumeknoppen blokkeren, app vastzetten (home/recente apps uit), als startscherm gebruiken
 
 ## Instellingen

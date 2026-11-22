@@ -9,6 +9,11 @@
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <!-- Frontcamera voor bewegingsdetectie; beelden worden enkel geanalyseerd, niet opgeslagen -->
     <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
+    <!-- Updates installeren vanuit de app -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
     <uses-feature android:name="android.hardware.camera" android:required="false" />
     <uses-feature android:name="android.hardware.camera.front" android:required="false" />
 
@@ -44,6 +49,26 @@
             </intent-filter>
         </activity-alias>
 
+        <!-- Tweede icoon op het startscherm: "HA Kiosk bijwerken" -->
+        <activity
+            android:name=".UpdateActivity"
+            android:excludeFromRecents="true"
+            android:exported="true"
+            android:icon="@drawable/ic_update"
+            android:label="HA Kiosk bijwerken"
+            android:taskAffinity="be.mo.hakiosk.update"
+            android:theme="@android:style/Theme.DeviceDefault.Light.Dialog">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <service
+            android:name=".MotionService"
+            android:exported="false"
+            android:foregroundServiceType="camera" />
+
         <receiver
             android:name=".BootReceiver"
             android:exported="true">
@@ -51,6 +76,23 @@
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
                 <action android:name="android.intent.action.QUICKBOOT_POWERON" />
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
+
+        <receiver
+            android:name=".InstallReceiver"
+            android:exported="false" />
+
+        <!-- Apparaatbeheerder: enkel om het scherm uit te mogen zetten -->
+        <receiver
+            android:name=".AdminReceiver"
+            android:exported="true"
+            android:permission="android.permission.BIND_DEVICE_ADMIN">
+            <meta-data
+                android:name="android.app.device_admin"
+                android:resource="@xml/device_admin" />
+            <intent-filter>
+                <action android:name="android.app.action.DEVICE_ADMIN_ENABLED" />
             </intent-filter>
         </receiver>
     </application>
