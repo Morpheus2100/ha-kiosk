@@ -82,6 +82,8 @@ public class MainActivity extends Activity {
     private boolean asleep = false;
     private long lastActivity = System.currentTimeMillis();
     private boolean sleptViaLock = false;
+    private boolean pinTried = false;   // hoogstens één poging per keer, geen eindeloze meldingen
+    private boolean pinHintShown = false;
     private long lastLoad = System.currentTimeMillis();
     private int cornerTaps = 0;
     private long firstCornerTap = 0;
@@ -487,6 +489,7 @@ public class MainActivity extends Activity {
                             .apply();
                     if (!url.equals(current)) web.loadUrl(url);
                     startMotion(true);
+                    pinHintShown = false;
                     if (!screenOffBox.isChecked() && adminActive()) {
                         devicePolicy().removeActiveAdmin(adminComponent());
                     }
@@ -597,18 +600,51 @@ public class MainActivity extends Activity {
         boolean dialogOpen = settingsDialog != null && settingsDialog.isShowing();
         if (dialogOpen || !hasWindowFocus()) return;
         if (prefs.getBoolean(KEY_PIN, false)) {
-            if (!inLockTask()) {
-                try {
-                    startLockTask();
-                } catch (Exception ignored) {
-                }
+            if (inLockTask() || pinTried) return;
+            if (!systemPinningEnabled()) {
+                showPinningHint();
+                return;
+            }
+            pinTried = true;
+            try {
+                startLockTask();
+            } catch (Exception ignored) {
             }
         } else {
             unpin();
         }
     }
 
+    /** Staat "Vensters vastzetten" (schermvastzetting) aan in de Android-instellingen? */
+    private boolean systemPinningEnabled() {
+        try {
+            return Settings.System.getInt(getContentResolver(), "lock_to_app_enabled", 1) != 0;
+        } catch (Exception e) {
+            return true; // onbekend: gewoon proberen
+        }
+    }
+
+    private void showPinningHint() {
+        if (pinHintShown) return;
+        pinHintShown = true;
+        new AlertDialog.Builder(this)
+                .setTitle("App vastzetten")
+                .setMessage("Om de app vast te zetten moet 'Vensters vastzetten' aan staan in de "
+                        + "Android-instellingen (meestal onder Vergrendelscherm en beveiliging → "
+                        + "Andere beveiligingsinstellingen). Zet het daar aan, of zet de optie "
+                        + "'App vastzetten' uit in de kiosk-instellingen.")
+                .setPositiveButton("Instellingen openen", (d, w) -> {
+                    try {
+                        startActivity(new Intent(Settings.ACTION_SECURITY_SETTINGS));
+                    } catch (Exception ignored) {
+                    }
+                })
+                .setNegativeButton("Later", null)
+                .show();
+    }
+
     private void unpin() {
+        pinTried = false; // na een bewuste onderbreking mag er opnieuw één poging komen
         if (!inLockTask()) return;
         try {
             stopLockTask();
