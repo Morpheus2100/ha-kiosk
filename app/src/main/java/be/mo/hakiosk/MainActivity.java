@@ -332,10 +332,8 @@ public class MainActivity extends Activity {
 
     /** Start de achtergronddienst (of herstart hem, bv. na een nieuwe gevoeligheid). */
     private void startMotion(boolean restart) {
-        if (!prefs.getBoolean(KEY_MOTION, true) || !hasCamera()) {
-            stopMotion();
-            return;
-        }
+        // De dienst draait altijd: hij stuurt ook de batterij naar Home Assistant.
+        // Bewegingsdetectie zelf zit er enkel in als die aan staat en de camera mag.
         if (restart && MotionService.running) MotionService.stop(this);
         MotionService.start(this);
     }
@@ -462,7 +460,11 @@ public class MainActivity extends Activity {
         if (!hasCamera()) motionInfo = "Geen toestemming voor de camera.";
         else if (lastMotion == 0) motionInfo = "Nog geen beweging gezien sinds de start.";
         else motionInfo = "Laatste beweging: " + (System.currentTimeMillis() - lastMotion) / 1000 + " s geleden.";
-        box.addView(label("\n" + motionInfo
+        String batteryInfo = MotionService.lastBatterySend == 0
+                ? "Batterij naar Home Assistant: " + MotionService.lastBatteryResult
+                : "Batterij naar Home Assistant: " + MotionService.lastBatteryResult + " ("
+                + (System.currentTimeMillis() - MotionService.lastBatterySend) / 1000 + " s geleden)";
+        box.addView(label("\n" + batteryInfo + "\n" + motionInfo
                 + "\nInstellingen openen: tik 5x snel in de linkerbovenhoek."
                 + "\nVersie " + versionName()));
 
